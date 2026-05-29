@@ -1,7 +1,7 @@
 # Makefile - wswitch Switcher v1.0
 CC = gcc
-PKG_CFLAGS = $(shell pkg-config --cflags wayland-client cairo pango pangocairo json-c xkbcommon)
-PKG_LIBS = $(shell pkg-config --libs wayland-client wayland-cursor cairo pango pangocairo json-c xkbcommon glib-2.0 gobject-2.0)
+PKG_CFLAGS = $(shell pkg-config --cflags wayland-client cairo pango pangocairo xkbcommon)
+PKG_LIBS = $(shell pkg-config --libs wayland-client cairo pango pangocairo xkbcommon glib-2.0 gobject-2.0)
 
 # Optional SVG support via librsvg
 RSVG_CFLAGS = $(shell pkg-config --cflags librsvg-2.0 2>/dev/null)
@@ -21,7 +21,7 @@ DOCDIR = $(PREFIX)/share/doc/wswitch
 SYSCONFDIR = /etc/xdg/wswitch
 
 # Source files
-SRC = src/main.c src/data.c src/render.c src/input.c src/config.c src/icons.c src/socket.c src/backend.c src/wlr_backend.c
+SRC = src/main.c src/data.c src/render.c src/input.c src/config.c src/icons.c src/socket.c src/backend.c src/wlr_backend.c src/mango_ipc.c
 OBJ = $(SRC:.c=.o) src/xdg-shell-protocol.o src/wlr-layer-shell-unstable-v1-protocol.o src/wlr-foreign-toplevel-management-unstable-v1-protocol.o
 TARGET = wswitch
 

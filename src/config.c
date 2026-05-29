@@ -15,6 +15,7 @@
 static void set_defaults(Config *cfg) {
   cfg->mode = MODE_CONTEXT;
   cfg->follow_monitor = true;
+  cfg->scope = SCOPE_CURRENT_TAG;
 
   /* Default Theme Colors */
   cfg->background = 0x1e1e2e;
@@ -84,6 +85,12 @@ static void apply_value(Config *cfg, const char *section, const char *key,
     } else if (strcasecmp(key, "follow_monitor") == 0) {
       cfg->follow_monitor =
           (strcasecmp(val, "true") == 0 || strcmp(val, "1") == 0);
+    } else if (strcasecmp(key, "scope") == 0) {
+      if (strcasecmp(val, "all") == 0)
+        cfg->scope = SCOPE_ALL;
+      else if (strcasecmp(val, "current_tag") == 0 ||
+               strcasecmp(val, "tag") == 0)
+        cfg->scope = SCOPE_CURRENT_TAG;
     }
   }
   /* Colors (from theme or manual override) */
@@ -257,7 +264,9 @@ static void create_default_config(const char *path) {
   fprintf(f, "# Auto-generated default config\n\n");
   fprintf(f, "[general]\n");
   fprintf(f, "# mode = context | overview\n");
-  fprintf(f, "mode = context\n\n");
+  fprintf(f, "mode = context\n");
+  fprintf(f, "# scope = current_tag | all  (mango tag scoping for Alt+Tab)\n");
+  fprintf(f, "scope = current_tag\n\n");
   fprintf(f, "[theme]\n");
   fprintf(f, "# Available: wswitch-slate, tokyo-night, catppuccin-mocha,\n");
   fprintf(f, "#            dracula, nord, gruvbox-dark, rose-pine, etc.\n");

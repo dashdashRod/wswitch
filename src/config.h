@@ -11,6 +11,12 @@ typedef enum {
   MODE_CONTEXT   /* Group tiled windows by workspace + app class */
 } ViewMode;
 
+/* Which windows the switcher cycles through (mango tag scoping) */
+typedef enum {
+  SCOPE_CURRENT_TAG, /* Only windows sharing the active window's tag */
+  SCOPE_ALL          /* Every window, regardless of tag (upstream behavior) */
+} TagScope;
+
 /* Theme configuration */
 typedef struct {
   /* Colors (0xRRGGBB) */
@@ -46,6 +52,7 @@ typedef struct {
   /* View Mode */
   bool follow_monitor;
   ViewMode mode;
+  TagScope scope; /* default scope for plain next/prev */
 } Config;
 
 /* Load config from file, returns default if file not found */

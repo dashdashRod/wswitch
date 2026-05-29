@@ -5,12 +5,14 @@
 #include "config.h"
 #include "icons.h"
 #include "input.h"
+#include "mango_ipc.h"
 #include "render.h"
 #include "socket.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -47,6 +49,11 @@ static bool visible = false;
 static AppState app_state;
 static Config *config = NULL;
 static int socket_fd = -1;
+static int g_lock_fd = -1;
+
+/* Scope to apply at the next show. Set by handle_command from either the
+ * config default (plain next/prev) or an explicit tag-/all- verb. */
+static TagScope g_show_scope = SCOPE_CURRENT_TAG;
 
 Backend *backend = NULL;
 
@@ -208,6 +215,47 @@ static void hide_switcher(void) {
   }
 }
 
+/* Restrict app_state.windows to the active window's mango tag, in place,
+ * preserving MRU order. No-op (shows everything) when scope is SCOPE_ALL,
+ * when mango/mmsg is unavailable, or when the current tag can't be
+ * determined -- so non-mango compositors behave exactly like upstream. */
+static void filter_to_scope(AppState *state, TagScope scope) {
+  if (scope == SCOPE_ALL || state->count <= 1)
+    return;
+
+  if (mango_refresh() == 0)
+    return; /* no tag data available -> don't filter */
+
+  /* Reference tag set = tagmask of the currently active window. */
+  unsigned ref = 0;
+  for (int i = 0; i < state->count; i++) {
+    if (state->windows[i].is_active) {
+      ref = mango_tagmask_for(state->windows[i].class_name,
+                              state->windows[i].title);
+      break;
+    }
+  }
+  if (ref == 0)
+    return; /* unknown current tag -> safer to show everything */
+
+  int kept = 0;
+  for (int i = 0; i < state->count; i++) {
+    unsigned m = mango_tagmask_for(state->windows[i].class_name,
+                                   state->windows[i].title);
+    /* Keep if it shares a tag with the active window. Windows mango does
+     * not report (m == 0, e.g. a transient race) are kept rather than
+     * silently hidden. */
+    if (m == 0 || (m & ref)) {
+      if (kept != i)
+        state->windows[kept] = state->windows[i];
+      kept++;
+    } else {
+      window_info_free(&state->windows[i]);
+    }
+  }
+  state->count = kept;
+}
+
 static void show_switcher(void) {
   LOG("Showing switcher...");
 
@@ -235,6 +283,8 @@ static void show_switcher(void) {
     LOG("Failed to update window list");
     return;
   }
+
+  filter_to_scope(&app_state, g_show_scope);
 
   app_state.selected_index = (app_state.count > 1) ? 1 : 0;
 
@@ -269,30 +319,52 @@ static void handle_command(const char *cmd) {
   }
 
   if (strcmp(cmd, CMD_TOGGLE) == 0) {
-    if (visible)
+    if (visible) {
       hide_switcher();
-    else
+    } else {
+      g_show_scope = config ? config->scope : SCOPE_CURRENT_TAG;
       show_switcher();
+    }
     return;
   }
 
-  /* Navigation */
-  if (!visible)
-    show_switcher();
-  else {
-    int dir = 0;
-    if (strcmp(cmd, CMD_NEXT) == 0)
-      dir = 1;
-    else if (strcmp(cmd, CMD_PREV) == 0)
-      dir = -1;
+  /* Navigation, with optional per-invocation scope override. */
+  int dir = 0;
+  TagScope scope = config ? config->scope : SCOPE_CURRENT_TAG;
 
-    if (dir != 0 && app_state.count > 0) {
-      app_state.selected_index =
-          (app_state.selected_index + dir + app_state.count) % app_state.count;
-      render_ui(&app_state, app_state.width, app_state.height);
-    } else if (strcmp(cmd, CMD_SELECT) == 0) {
+  if (strcmp(cmd, CMD_NEXT) == 0) {
+    dir = 1;
+  } else if (strcmp(cmd, CMD_PREV) == 0) {
+    dir = -1;
+  } else if (strcmp(cmd, CMD_NEXT_TAG) == 0) {
+    dir = 1;
+    scope = SCOPE_CURRENT_TAG;
+  } else if (strcmp(cmd, CMD_PREV_TAG) == 0) {
+    dir = -1;
+    scope = SCOPE_CURRENT_TAG;
+  } else if (strcmp(cmd, CMD_NEXT_ALL) == 0) {
+    dir = 1;
+    scope = SCOPE_ALL;
+  } else if (strcmp(cmd, CMD_PREV_ALL) == 0) {
+    dir = -1;
+    scope = SCOPE_ALL;
+  } else if (strcmp(cmd, CMD_SELECT) == 0) {
+    if (visible)
       select_and_hide();
-    }
+    return;
+  } else {
+    return; /* unknown command */
+  }
+
+  /* Scope only matters at show time (the first press). Once the overlay is
+   * up the candidate list is already fixed, so further taps just cycle. */
+  if (!visible) {
+    g_show_scope = scope;
+    show_switcher();
+  } else if (app_state.count > 0) {
+    app_state.selected_index =
+        (app_state.selected_index + dir + app_state.count) % app_state.count;
+    render_ui(&app_state, app_state.width, app_state.height);
   }
 }
 
@@ -303,6 +375,14 @@ static int run_client(const char *cmd) {
     socket_cmd = CMD_NEXT;
   else if (strcmp(cmd, "prev") == 0)
     socket_cmd = CMD_PREV;
+  else if (strcmp(cmd, "tag-next") == 0)
+    socket_cmd = CMD_NEXT_TAG;
+  else if (strcmp(cmd, "tag-prev") == 0)
+    socket_cmd = CMD_PREV_TAG;
+  else if (strcmp(cmd, "all-next") == 0)
+    socket_cmd = CMD_NEXT_ALL;
+  else if (strcmp(cmd, "all-prev") == 0)
+    socket_cmd = CMD_PREV_ALL;
   else if (strcmp(cmd, "select") == 0)
     socket_cmd = CMD_SELECT;
   else if (strcmp(cmd, "toggle") == 0)
@@ -321,11 +401,64 @@ static int run_client(const char *cmd) {
   return send_command(socket_cmd) == 0 ? 0 : 1;
 }
 
+/* Single-instance guard via a POSIX advisory lock held for the daemon's
+ * lifetime. The kernel releases it automatically when the process exits --
+ * even on a crash or SIGKILL -- so it never goes stale, and two daemons can
+ * never run at once (which is what corrupts the shared socket). Returns 0 on
+ * success, -1 if another live daemon already holds the lock. Lock-file
+ * trouble that isn't "someone else holds it" is treated as non-fatal so a
+ * weird filesystem can't prevent the daemon from starting. */
+static int acquire_single_instance_lock(void) {
+  const char *dir = getenv("XDG_RUNTIME_DIR");
+  char path[256];
+  if (dir && *dir)
+    snprintf(path, sizeof(path), "%s/wswitch.lock", dir);
+  else
+    snprintf(path, sizeof(path), "/tmp/wswitch.lock");
+
+  g_lock_fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+  if (g_lock_fd < 0) {
+    LOG("Could not open lock file %s: %s -- continuing", path,
+        strerror(errno));
+    return 0;
+  }
+
+  struct flock fl;
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  fl.l_start = 0;
+  fl.l_len = 0; /* whole file */
+
+  if (fcntl(g_lock_fd, F_SETLK, &fl) < 0) {
+    if (errno == EACCES || errno == EAGAIN) {
+      close(g_lock_fd);
+      g_lock_fd = -1;
+      return -1; /* another daemon already holds the lock */
+    }
+    LOG("Lock check failed on %s: %s -- continuing", path, strerror(errno));
+    return 0;
+  }
+
+  /* Stamp our PID for anyone inspecting the file. */
+  if (ftruncate(g_lock_fd, 0) == 0) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+    if (n > 0) {
+      ssize_t w = write(g_lock_fd, buf, (size_t)n);
+      (void)w;
+    }
+  }
+  return 0;
+}
+
 /* Daemon Mode */
 static int run_daemon(void) {
-  /* Check if daemon is already running */
-  if (is_daemon_running()) {
-    fprintf(stderr, "Error: Daemon is already running.\n");
+  /* Single-instance guard: an atomic lock that the kernel auto-releases on
+   * exit. Replaces the old is_daemon_running() probe, which had a startup
+   * race (two daemons could both pass the check before either bound). */
+  if (acquire_single_instance_lock() < 0) {
+    fprintf(stderr, "Error: another wswitch daemon is already running.\n");
     return 1;
   }
 
@@ -344,6 +477,7 @@ static int run_daemon(void) {
   config = load_config();
   if (!config)
     config = get_default_config();
+  g_show_scope = config->scope;
   render_set_config(config);
   icons_init(config->icon_theme, config->icon_fallback);
   app_state_init(&app_state);
@@ -504,6 +638,9 @@ static int run_daemon(void) {
   cleanup_server(socket_fd);
   input_cleanup();
   icons_cleanup();
+  mango_ipc_cleanup();
+  if (g_lock_fd >= 0)
+    close(g_lock_fd); /* releases the single-instance lock */
   app_state_free(&app_state);
   free_config(config);
 

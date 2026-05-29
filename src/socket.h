@@ -14,6 +14,11 @@
 #define CMD_TOGGLE "TOGGLE"
 #define CMD_HIDE "HIDE"
 #define CMD_QUIT "QUIT"
+/* Scope-overriding navigation: force current-tag or all-tags for this show */
+#define CMD_NEXT_TAG "NEXT_TAG"
+#define CMD_PREV_TAG "PREV_TAG"
+#define CMD_NEXT_ALL "NEXT_ALL"
+#define CMD_PREV_ALL "PREV_ALL"
 
 /* Server functions (daemon) */
 int init_server(void);
